@@ -1,44 +1,35 @@
 "use client";
 
 import React, { useState, useEffect, useCallback } from "react";
+import { useRouter } from "next/navigation";
 import { Navbar } from "@/components/Navbar";
 import { AudioDetailPlayer } from "@/components/AudioDetailPlayer";
-import { TranscriptViewer } from "@/components/TranscriptViewer";
-import { RagChat } from "@/components/RagChat";
-import { ActionItemsPanel } from "@/components/ActionItemsPanel";
 import { UploadModal } from "@/components/UploadModal";
 import { VerificationModal } from "@/components/VerificationModal";
 import { Sidebar } from "@/components/Sidebar";
 import { api, Recording } from "@/lib/api";
-import { Headphones, Mic } from "lucide-react";
+import { Mic2, Sparkles, ArrowRight } from "lucide-react";
 
 export default function DashboardPage() {
+  const router = useRouter();
   const [recordings, setRecordings] = useState<Recording[]>([]);
   const [selectedRecording, setSelectedRecording] = useState<Recording | null>(null);
-  const [currentTimeMs, setCurrentTimeMs] = useState(0);
   const [seekTimeMs, setSeekTimeMs] = useState<number | null>(null);
-  const [searchQuery, setSearchQuery] = useState("");
   const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [uploadModalMode, setUploadModalMode] = useState<"record" | "upload">("record");
   const [isVerificationOpen, setIsVerificationOpen] = useState(false);
   const [dbMode, setDbMode] = useState("MongoDB");
-  const [loading, setLoading] = useState(true);
+  const [searchQuery, setSearchQuery] = useState("");
 
   // ─── Data Loading ───────────────────────────────────────────────────────────
   const loadRecordings = useCallback(async () => {
     try {
       const data = await api.getRecordings();
       setRecordings(data);
-      if (data.length > 0 && !selectedRecording) {
-        const detail = await api.getRecordingDetail(data[0].id);
-        setSelectedRecording(detail);
-      }
     } catch (err) {
       console.error("Error loading recordings:", err);
-    } finally {
-      setLoading(false);
     }
-  }, [selectedRecording]);
+  }, []);
 
   const loadHealth = useCallback(async () => {
     try {
@@ -64,7 +55,6 @@ export default function DashboardPage() {
       const detail = await api.getRecordingDetail(rec.id);
       setSelectedRecording(detail);
       setSeekTimeMs(0);
-      setCurrentTimeMs(0);
     } catch (e) {
       console.error(e);
     }
@@ -76,14 +66,8 @@ export default function DashboardPage() {
       const updatedList = await api.getRecordings();
       setRecordings(updatedList);
       if (selectedRecording?.id === recordingId) {
-        if (updatedList.length > 0) {
-          const first = await api.getRecordingDetail(updatedList[0].id);
-          setSelectedRecording(first);
-        } else {
-          setSelectedRecording(null);
-        }
+        setSelectedRecording(null);
         setSeekTimeMs(0);
-        setCurrentTimeMs(0);
       }
     } catch (err) {
       console.error("Failed to delete recording:", err);
@@ -99,7 +83,6 @@ export default function DashboardPage() {
         const detail = await api.getRecordingDetail(newRecordingId);
         setSelectedRecording(detail);
         setSeekTimeMs(0);
-        setCurrentTimeMs(0);
       } else if (data.length > 0) {
         const detail = await api.getRecordingDetail(data[0].id);
         setSelectedRecording(detail);
@@ -107,17 +90,6 @@ export default function DashboardPage() {
     } catch (err) {
       console.error("Error refreshing recordings after upload:", err);
     }
-  };
-
-  const handleCitationClick = async (recordingId: string, timeMs: number) => {
-    if (!selectedRecording || selectedRecording.id !== recordingId) {
-      const target = recordings.find((r) => r.id === recordingId);
-      if (target) {
-        const detail = await api.getRecordingDetail(target.id);
-        setSelectedRecording(detail);
-      }
-    }
-    setSeekTimeMs(timeMs);
   };
 
   // ─── Render ──────────────────────────────────────────────────────────────────
@@ -169,50 +141,98 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          {/* Content: Player + Transcript | Chat + Actions */}
-          <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
-
-            {/* Player + Transcript (7 cols) */}
-            <div className="xl:col-span-7 space-y-4">
-              {selectedRecording ? (
-                <>
-                  <AudioDetailPlayer
-                    recording={selectedRecording}
-                    seekTimeMs={seekTimeMs}
-                    onTimeUpdate={(ms) => setCurrentTimeMs(ms)}
-                    onDelete={handleDeleteRecording}
-                  />
-                  <div className="h-[500px] overflow-hidden rounded-xl border border-[#1f1f2e]">
-                    <TranscriptViewer
-                      segments={selectedRecording.segments || []}
-                      currentTimeMs={currentTimeMs}
-                      onSeek={(ms) => setSeekTimeMs(ms)}
-                      wordCount={selectedRecording.word_count || 0}
-                    />
-                  </div>
-                </>
-              ) : (
-                <div className="flex flex-col items-center justify-center h-64 rounded-xl border border-[#1f1f2e] bg-[#111118] text-gray-600 gap-3">
-                  <Headphones className="w-10 h-10" />
-                  <p className="text-sm">Select a recording from the sidebar to get started.</p>
-                </div>
-              )}
-            </div>
-
-            {/* RAG Chat + Action Items (5 cols) */}
-            <div className="xl:col-span-5 space-y-4">
-              <div className="h-[420px] overflow-hidden rounded-xl border border-[#1f1f2e]">
-                <RagChat onCitationClick={handleCitationClick} />
-              </div>
-              <ActionItemsPanel
-                actionItems={selectedRecording?.action_items || []}
-                onActionUpdated={() => {
-                  if (selectedRecording) handleSelectRecording(selectedRecording);
-                }}
+          {/* Selected recording preview */}
+          {selectedRecording ? (
+            <div className="space-y-4">
+              {/* Player */}
+              <AudioDetailPlayer
+                recording={selectedRecording}
+                seekTimeMs={seekTimeMs}
+                onTimeUpdate={() => {}}
+                onDelete={handleDeleteRecording}
               />
-            </div>
 
-          </div>
+              {/* Open Insights CTA */}
+              <button
+                onClick={() => router.push(`/recordings/${selectedRecording.id}`)}
+                className="w-full flex items-center justify-between rounded-xl border border-violet-600/30 bg-violet-600/10 px-5 py-4 hover:bg-violet-600/20 hover:border-violet-500/50 transition-all group"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-lg bg-violet-600/20 flex items-center justify-center">
+                    <Sparkles className="w-4 h-4 text-violet-400" />
+                  </div>
+                  <div className="text-left">
+                    <p className="text-sm font-semibold text-white">View Transcript & Chat</p>
+                    <p className="text-xs text-gray-500">Full transcript with Claude AI insights for this recording</p>
+                  </div>
+                </div>
+                <ArrowRight className="w-4 h-4 text-violet-400 group-hover:translate-x-1 transition-transform" />
+              </button>
+            </div>
+          ) : (
+            /* Empty state */
+            <div className="flex flex-col items-center justify-center h-64 rounded-xl border border-dashed border-[#1f1f2e] text-gray-600 gap-4">
+              <Mic2 className="w-10 h-10" />
+              <div className="text-center">
+                <p className="text-sm font-medium text-gray-500">No recording selected</p>
+                <p className="text-xs mt-1">Click a recording in the sidebar to preview it, or record a new one.</p>
+              </div>
+              <button
+                onClick={() => { setUploadModalMode("record"); setIsUploadOpen(true); }}
+                className="px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-sm font-medium transition-colors"
+              >
+                Record Now
+              </button>
+            </div>
+          )}
+
+          {/* All recordings grid */}
+          {recordings.length > 0 && (
+            <div>
+              <p className="text-xs text-gray-500 uppercase tracking-widest mb-3 font-mono">All Recordings</p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
+                {recordings.map((rec) => (
+                  <button
+                    key={rec.id}
+                    onClick={() => router.push(`/recordings/${rec.id}`)}
+                    className={`text-left rounded-xl border p-4 transition-all hover:border-violet-600/40 hover:bg-violet-600/5 ${
+                      selectedRecording?.id === rec.id
+                        ? "border-violet-600/40 bg-violet-600/10"
+                        : "border-[#1f1f2e] bg-[#111118]"
+                    }`}
+                  >
+                    <div className="flex items-start gap-3">
+                      <div className="w-8 h-8 rounded-lg bg-[#1a1a2e] flex items-center justify-center shrink-0 mt-0.5">
+                        <Mic2 className="w-4 h-4 text-violet-400" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-white truncate">{rec.filename}</p>
+                        <p className="text-xs text-gray-500 mt-0.5">
+                          {rec.recorded_at ? new Date(rec.recorded_at).toLocaleString() : "—"}
+                        </p>
+                        <div className="flex items-center gap-3 mt-2">
+                          <span className="text-[10px] text-gray-600 font-mono">{rec.word_count || 0} words</span>
+                          {rec.duration_ms > 0 && (
+                            <span className="text-[10px] text-gray-600 font-mono">
+                              {Math.round(rec.duration_ms / 1000)}s
+                            </span>
+                          )}
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                            rec.status === "COMPLETED"
+                              ? "text-green-400 bg-green-400/10"
+                              : "text-yellow-400 bg-yellow-400/10"
+                          }`}>
+                            {rec.status}
+                          </span>
+                        </div>
+                      </div>
+                      <ArrowRight className="w-3.5 h-3.5 text-gray-600 mt-1 shrink-0" />
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </main>
       </div>
 

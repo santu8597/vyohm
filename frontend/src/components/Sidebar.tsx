@@ -142,7 +142,7 @@ export function Sidebar({
                         onClick={(e) => {
                           e.stopPropagation();
                           onSelectRecording(rec);
-                          router.push(`/chat/${rec.id}`);
+                          router.push(`/recordings/${rec.id}`);
                         }}
                         title="Insights"
                         className="p-1 rounded hover:bg-violet-600/20 text-gray-600 hover:text-violet-400 transition-colors"

@@ -33,6 +33,7 @@ from backend.agent import (
 )
 from backend.watcher import start_watcher, WATCH_DIR
 from backend.storage import storage
+from backend.claude_chat import chat_with_recording
 
 app = FastAPI(
     title="Vyohm Audio Pipeline & Alignment Layer",
@@ -245,6 +246,34 @@ def chat_with_agent(req: ChatQueryRequest):
     """
     response = answer_query_with_citations(req.query)
     return response
+
+
+# ---------------- CLAUDE RECORDING-SCOPED CHAT ---------------- #
+
+class RecordingChatMessage(BaseModel):
+    role: str  # "user" or "assistant"
+    content: str
+
+class RecordingChatRequest(BaseModel):
+    messages: List[RecordingChatMessage]  # full conversation history
+
+
+@app.post("/chat/recording/{recording_id}")
+def claude_recording_chat(recording_id: str, req: RecordingChatRequest):
+    """
+    Claude-powered chat endpoint scoped to a single recording.
+    Injects full transcript (with speaker labels & timestamps) as system context.
+    Claude answers ONLY from this recording's content.
+    """
+    rec = db.get_recording(recording_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    
+    segments = db.get_segments(recording_id)
+    messages = [{"role": m.role, "content": m.content} for m in req.messages]
+    
+    result = chat_with_recording(rec, segments, messages)
+    return result
 
 
 @app.get("/search")

@@ -71,6 +71,24 @@ export interface VerificationResult {
   [key: string]: any;
 }
 
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface ToolAction {
+  tool: "create_calendar_event" | "draft_email" | string;
+  input: Record<string, any>;
+  result: string;
+}
+
+export interface RecordingChatResponse {
+  answer: string;
+  model: string;
+  recording_id: string;
+  tool_actions: ToolAction[];
+}
+
 export const api = {
   async getHealth() {
     const res = await fetch(`${API_BASE}/health`);
@@ -147,6 +165,17 @@ export const api = {
     return res.json();
   },
 
+  /** Claude-powered chat scoped to a single recording's transcript */
+  async chatWithRecording(recordingId: string, messages: ChatMessage[]): Promise<RecordingChatResponse> {
+    const res = await fetch(`${API_BASE}/chat/recording/${recordingId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages }),
+    });
+    if (!res.ok) throw new Error("Chat request failed");
+    return res.json();
+  },
+
   async runPhase1(): Promise<VerificationResult> {
     const res = await fetch(`${API_BASE}/verify/phase1`, { method: "POST" });
     return res.json();
@@ -162,3 +191,4 @@ export const api = {
     return res.json();
   },
 };
+
