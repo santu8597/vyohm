@@ -241,6 +241,30 @@ class DatabaseManager:
         conn.close()
         return rows
 
+    def delete_recording(self, recording_id: str) -> bool:
+        """
+        Deletes recording and all associated segments and action items from DB.
+        Returns True if recording was deleted, False if not found.
+        """
+        if self.mode == "mongodb":
+            try:
+                self.mongo_db.segments.delete_many({"recording_id": recording_id})
+                self.mongo_db.action_items.delete_many({"recording_id": recording_id})
+                res = self.mongo_db.recordings.delete_one({"id": recording_id})
+                return res.deleted_count > 0
+            except Exception as e:
+                print(f"[Database] Mongo delete error: {e}")
+
+        conn = self._get_sqlite_conn()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM segments WHERE recording_id = ?", (recording_id,))
+        cursor.execute("DELETE FROM action_items WHERE recording_id = ?", (recording_id,))
+        cursor.execute("DELETE FROM recordings WHERE id = ?", (recording_id,))
+        deleted = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        return deleted
+
     # ---------------- SEGMENTS ---------------- #
 
     def save_segments(self, recording_id: str, segments: List[Dict[str, Any]]):

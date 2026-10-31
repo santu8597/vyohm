@@ -1,13 +1,14 @@
 "use client";
 
 import React from "react";
-import { Folder, Clock, Hash, ChevronRight, Search, Radio } from "lucide-react";
+import { Folder, Clock, Hash, ChevronRight, Search, Radio, Trash2 } from "lucide-react";
 import { Recording } from "@/lib/api";
 
 interface RecordingListProps {
   recordings: Recording[];
   selectedId: string | null;
   onSelect: (recording: Recording) => void;
+  onDelete?: (recordingId: string) => void;
   searchQuery: string;
   onSearchChange: (q: string) => void;
   onSearchSubmit: () => void;
@@ -17,6 +18,7 @@ export function RecordingList({
   recordings,
   selectedId,
   onSelect,
+  onDelete,
   searchQuery,
   onSearchChange,
   onSearchSubmit,
@@ -87,11 +89,28 @@ export function RecordingList({
                       {rec.device_id} • {new Date(rec.recorded_at).toLocaleDateString()}
                     </p>
                   </div>
-                  <ChevronRight
-                    className={`w-4 h-4 shrink-0 transition-transform ${
-                      isSelected ? "text-indigo-400 translate-x-0.5" : "text-slate-600"
-                    }`}
-                  />
+                  <div className="flex items-center gap-1 shrink-0">
+                    {onDelete && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (window.confirm(`Delete recording "${rec.filename}"?\n\nThis will permanently remove the audio file from backend/uploads, MinIO bucket, and the database.`)) {
+                            onDelete(rec.id);
+                          }
+                        }}
+                        title="Delete recording and audio file"
+                        className="p-1 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-rose-500/15 transition opacity-60 hover:opacity-100"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                    <ChevronRight
+                      className={`w-4 h-4 transition-transform ${
+                        isSelected ? "text-indigo-400 translate-x-0.5" : "text-slate-600"
+                      }`}
+                    />
+                  </div>
                 </div>
 
                 <div className="flex items-center gap-3 mt-2.5 pt-2 border-t border-slate-800/60 text-[11px] text-slate-400 font-mono">

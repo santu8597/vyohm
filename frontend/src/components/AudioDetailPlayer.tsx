@@ -1,19 +1,21 @@
 "use client";
 
 import React, { useRef, useState, useEffect } from "react";
-import { Play, Pause, Volume2, FastForward, RotateCcw } from "lucide-react";
+import { Play, Pause, Volume2, FastForward, RotateCcw, Trash2 } from "lucide-react";
 import { api, Recording } from "@/lib/api";
 
 interface AudioDetailPlayerProps {
   recording: Recording;
   seekTimeMs?: number | null;
   onTimeUpdate?: (currentTimeMs: number) => void;
+  onDelete?: (recordingId: string) => void;
 }
 
 export function AudioDetailPlayer({
   recording,
   seekTimeMs,
   onTimeUpdate,
+  onDelete,
 }: AudioDetailPlayerProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -104,20 +106,38 @@ export function AudioDetailPlayer({
           </p>
         </div>
 
-        {/* Audio Waveform visualization preview */}
-        <div className="flex items-center gap-1.5 h-8 px-4 py-1 rounded-xl bg-slate-900/60 border border-slate-800">
-          {[12, 24, 18, 30, 14, 28, 20, 16, 26, 10, 22, 14, 30, 18, 24].map((h, i) => (
-            <div
-              key={i}
-              className={`w-1 rounded-full transition-all duration-300 ${
-                isPlaying ? "bg-indigo-400" : "bg-slate-600"
-              }`}
-              style={{
-                height: isPlaying ? `${Math.max(6, (h * (i % 2 === 0 ? 1.2 : 0.8)))}px` : `${Math.min(10, h)}px`,
-                animationDelay: `${i * 0.08}s`,
+        <div className="flex items-center gap-3">
+          {/* Audio Waveform visualization preview */}
+          <div className="flex items-center gap-1.5 h-8 px-4 py-1 rounded-xl bg-slate-900/60 border border-slate-800">
+            {[12, 24, 18, 30, 14, 28, 20, 16, 26, 10, 22, 14, 30, 18, 24].map((h, i) => (
+              <div
+                key={i}
+                className={`w-1 rounded-full transition-all duration-300 ${
+                  isPlaying ? "bg-indigo-400" : "bg-slate-600"
+                }`}
+                style={{
+                  height: isPlaying ? `${Math.max(6, (h * (i % 2 === 0 ? 1.2 : 0.8)))}px` : `${Math.min(10, h)}px`,
+                  animationDelay: `${i * 0.08}s`,
+                }}
+              />
+            ))}
+          </div>
+
+          {onDelete && (
+            <button
+              type="button"
+              onClick={() => {
+                if (window.confirm(`Are you sure you want to delete "${recording.filename}"?\n\nThis will remove the file from backend/uploads, MinIO bucket, and the database.`)) {
+                  onDelete(recording.id);
+                }
               }}
-            />
-          ))}
+              title="Delete this recording"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 text-xs font-semibold transition"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Delete</span>
+            </button>
+          )}
         </div>
       </div>
 

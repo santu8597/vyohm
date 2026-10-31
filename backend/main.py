@@ -32,6 +32,7 @@ from backend.agent import (
     draft_email,
 )
 from backend.watcher import start_watcher, WATCH_DIR
+from backend.storage import storage
 
 app = FastAPI(
     title="Vyohm Audio Pipeline & Alignment Layer",
@@ -71,6 +72,7 @@ def health():
     return {
         "status": "healthy",
         "database": db.mode,
+        "storage": storage.get_status(),
         "uploads_dir": WATCH_DIR,
         "timestamp": datetime.datetime.utcnow().isoformat()
     }
@@ -119,13 +121,17 @@ async def upload_audio(
             "recorded_at": recorded_at
         }
 
-    # Save audio stream to disk
+    # Save audio stream to local PC disk (backend/uploads/) & sync to MinIO
     contents = await audio.read()
-    with open(saved_path, "wb") as f:
-        f.write(contents)
+    storage_res = storage.save_audio(safe_filename, contents)
+    saved_path = storage_res["filepath"]
 
     job_id = f"job-{uuid.uuid4().hex[:8]}"
-    db.set_job(job_id, status="PENDING", stage="received", data={"recording_id": rec["id"], "file": safe_filename})
+    db.set_job(job_id, status="PENDING", stage="received", data={
+        "recording_id": rec["id"],
+        "file": safe_filename,
+        "minio_synced": storage_res.get("minio_synced", False)
+    })
 
     # Trigger async background pipeline
     background_tasks.add_task(run_pipeline, job_id, rec["id"], saved_path)
@@ -170,16 +176,58 @@ def get_recording_detail(recording_id: str):
     return rec
 
 
+@app.delete("/recordings/{recording_id}")
+def delete_recording(recording_id: str):
+    """
+    Deletes a recording:
+    1. Removes audio file from local PC disk (backend/uploads/).
+    2. Removes audio object from MinIO if connected.
+    3. Deletes recording record, segments, and action items from the database.
+    """
+    rec = db.get_recording(recording_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    # Delete audio from local PC and MinIO
+    storage_res = storage.delete_audio(rec.get("filepath", ""), rec.get("filename"))
+
+    # Delete from database
+    db_deleted = db.delete_recording(recording_id)
+
+    return {
+        "status": "deleted",
+        "recording_id": recording_id,
+        "database_deleted": db_deleted,
+        "storage": storage_res
+    }
+
+
 @app.get("/audio/{recording_id}")
 def stream_audio(recording_id: str):
     """Streams audio file for HTML <audio> player."""
     rec = db.get_recording(recording_id)
-    if not rec or not os.path.exists(rec.get("filepath", "")):
-        # Generate on-the-fly sample WAV if file not present
-        fallback_path = os.path.join(WATCH_DIR, f"{recording_id}.wav")
-        generate_synthetic_audio(fallback_path, duration_sec=9.0)
-        return FileResponse(fallback_path, media_type="audio/wav")
-    return FileResponse(rec["filepath"], media_type="audio/wav")
+    if not rec:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    filepath = rec.get("filepath", "")
+    if not os.path.exists(filepath):
+        alt_path = os.path.join(WATCH_DIR, rec.get("filename", ""))
+        if os.path.exists(alt_path):
+            filepath = alt_path
+        else:
+            raise HTTPException(status_code=404, detail="Audio file not found on disk")
+
+    ext = os.path.splitext(filepath)[1].lower()
+    media_map = {
+        ".wav": "audio/wav",
+        ".mp3": "audio/mpeg",
+        ".m4a": "audio/mp4",
+        ".webm": "audio/webm",
+        ".ogg": "audio/ogg",
+        ".flac": "audio/flac"
+    }
+    media_type = media_map.get(ext, "audio/wav")
+    return FileResponse(rec["filepath"], media_type=media_type)
 
 
 # ---------------- PHASE 2: RAG AGENT & CITATION ENFORCEMENT ---------------- #

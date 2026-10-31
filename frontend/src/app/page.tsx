@@ -2,15 +2,15 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import { Navbar } from "@/components/Navbar";
-import { RecordingList } from "@/components/RecordingList";
 import { AudioDetailPlayer } from "@/components/AudioDetailPlayer";
 import { TranscriptViewer } from "@/components/TranscriptViewer";
 import { RagChat } from "@/components/RagChat";
 import { ActionItemsPanel } from "@/components/ActionItemsPanel";
 import { UploadModal } from "@/components/UploadModal";
 import { VerificationModal } from "@/components/VerificationModal";
+import { Sidebar } from "@/components/Sidebar";
 import { api, Recording } from "@/lib/api";
-import { Headphones, Sparkles, AlertCircle } from "lucide-react";
+import { Headphones, Mic } from "lucide-react";
 
 export default function DashboardPage() {
   const [recordings, setRecordings] = useState<Recording[]>([]);
@@ -19,17 +19,17 @@ export default function DashboardPage() {
   const [seekTimeMs, setSeekTimeMs] = useState<number | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [isUploadOpen, setIsUploadOpen] = useState(false);
+  const [uploadModalMode, setUploadModalMode] = useState<"record" | "upload">("record");
   const [isVerificationOpen, setIsVerificationOpen] = useState(false);
   const [dbMode, setDbMode] = useState("MongoDB");
   const [loading, setLoading] = useState(true);
 
-  // Load recordings list
+  // ─── Data Loading ───────────────────────────────────────────────────────────
   const loadRecordings = useCallback(async () => {
     try {
       const data = await api.getRecordings();
       setRecordings(data);
       if (data.length > 0 && !selectedRecording) {
-        // Automatically select first recording
         const detail = await api.getRecordingDetail(data[0].id);
         setSelectedRecording(detail);
       }
@@ -40,14 +40,13 @@ export default function DashboardPage() {
     }
   }, [selectedRecording]);
 
-  // Load health & DB mode
   const loadHealth = useCallback(async () => {
     try {
       const health = await api.getHealth();
       if (health.database) {
         setDbMode(health.database === "mongodb" ? "MongoDB (Active)" : "SQLite (Fallback)");
       }
-    } catch (e) {
+    } catch {
       setDbMode("Offline");
     }
   }, []);
@@ -55,16 +54,11 @@ export default function DashboardPage() {
   useEffect(() => {
     loadRecordings();
     loadHealth();
-
-    // Phase 3.2 L6 Requirement: Dashboard polls every 10 seconds to catch live watcher ingest
-    const interval = setInterval(() => {
-      loadRecordings();
-    }, 10000);
-
+    const interval = setInterval(() => loadRecordings(), 10000);
     return () => clearInterval(interval);
   }, [loadRecordings, loadHealth]);
 
-  // Handle recording selection
+  // ─── Handlers ───────────────────────────────────────────────────────────────
   const handleSelectRecording = async (rec: Recording) => {
     try {
       const detail = await api.getRecordingDetail(rec.id);
@@ -76,7 +70,45 @@ export default function DashboardPage() {
     }
   };
 
-  // Handle citation click in RAG Chat (L4/Phase 2)
+  const handleDeleteRecording = async (recordingId: string) => {
+    try {
+      await api.deleteRecording(recordingId);
+      const updatedList = await api.getRecordings();
+      setRecordings(updatedList);
+      if (selectedRecording?.id === recordingId) {
+        if (updatedList.length > 0) {
+          const first = await api.getRecordingDetail(updatedList[0].id);
+          setSelectedRecording(first);
+        } else {
+          setSelectedRecording(null);
+        }
+        setSeekTimeMs(0);
+        setCurrentTimeMs(0);
+      }
+    } catch (err) {
+      console.error("Failed to delete recording:", err);
+      alert("Failed to delete recording.");
+    }
+  };
+
+  const handleUploadSuccess = async (newRecordingId?: string) => {
+    try {
+      const data = await api.getRecordings();
+      setRecordings(data);
+      if (newRecordingId) {
+        const detail = await api.getRecordingDetail(newRecordingId);
+        setSelectedRecording(detail);
+        setSeekTimeMs(0);
+        setCurrentTimeMs(0);
+      } else if (data.length > 0) {
+        const detail = await api.getRecordingDetail(data[0].id);
+        setSelectedRecording(detail);
+      }
+    } catch (err) {
+      console.error("Error refreshing recordings after upload:", err);
+    }
+  };
+
   const handleCitationClick = async (recordingId: string, timeMs: number) => {
     if (!selectedRecording || selectedRecording.id !== recordingId) {
       const target = recordings.find((r) => r.id === recordingId);
@@ -88,133 +120,109 @@ export default function DashboardPage() {
     setSeekTimeMs(timeMs);
   };
 
-  // Search handler
-  const handleSearchSubmit = async () => {
-    if (!searchQuery.trim()) {
-      loadRecordings();
-      return;
-    }
-    try {
-      const results = await api.searchTranscripts(searchQuery);
-      if (results && results.length > 0) {
-        const firstMatchRecId = results[0].recording_id;
-        const target = recordings.find((r) => r.id === firstMatchRecId);
-        if (target) {
-          const detail = await api.getRecordingDetail(target.id);
-          setSelectedRecording(detail);
-          setSeekTimeMs(results[0].start_ms);
-        }
-      }
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
+  // ─── Render ──────────────────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen flex flex-col bg-[#090d16] text-slate-100">
-      <Navbar
-        onOpenUpload={() => setIsUploadOpen(true)}
-        onOpenVerification={() => setIsVerificationOpen(true)}
-        dbMode={dbMode}
+    <div className="flex h-screen w-screen overflow-hidden bg-[#0a0a0a] text-white">
+
+      {/* ── Left Sidebar ─────────────────────────────────────────────────── */}
+      <Sidebar
+        recordings={recordings}
+        selectedId={selectedRecording?.id || null}
+        onSelectRecording={handleSelectRecording}
+        onDeleteRecording={handleDeleteRecording}
+        searchQuery={searchQuery}
+        onSearchChange={setSearchQuery}
       />
 
-      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 space-y-6">
-        {/* Top Hero Banner */}
-        <div className="glass-panel rounded-2xl p-6 bg-gradient-to-r from-slate-900/90 via-indigo-950/40 to-slate-900/90 border border-slate-800 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-          <div>
-            <div className="flex items-center gap-2 text-indigo-400 font-mono text-xs font-semibold uppercase tracking-wider mb-1">
-              <Sparkles className="w-4 h-4" />
-              <span>WhisperLiveKit Specification & Zero-Loss Engine</span>
+      {/* ── Right: Navbar + Content ───────────────────────────────────────── */}
+      <div className="flex flex-col flex-1 overflow-hidden">
+
+        {/* Top Navbar */}
+        <Navbar
+          onOpenRecord={() => { setUploadModalMode("record"); setIsUploadOpen(true); }}
+          onOpenUpload={() => { setUploadModalMode("upload"); setIsUploadOpen(true); }}
+          onOpenVerification={() => setIsVerificationOpen(true)}
+          dbMode={dbMode}
+        />
+
+        {/* Main scrollable content */}
+        <main className="flex-1 overflow-y-auto p-6 space-y-6">
+
+          {/* Stats bar */}
+          <div className="flex items-center justify-between rounded-xl border border-[#1f1f2e] bg-[#111118] px-6 py-4">
+            <div>
+              <p className="text-xs text-gray-500 uppercase tracking-widest font-mono">Dashboard</p>
+              <h1 className="text-xl font-bold text-white mt-0.5">Your Recordings</h1>
             </div>
-            <h2 className="text-2xl font-extrabold text-white tracking-tight">
-              Executive Audio Attribution & RAG Center
-            </h2>
-            <p className="text-xs text-slate-300 mt-1 max-w-2xl">
-              Word-level timestamp attribution, isolated silence spans, strict citations, and confirmation-gated tools with zero send risk.
-            </p>
-          </div>
-
-          <div className="flex items-center gap-4 shrink-0 font-mono text-xs">
-            <div className="text-right">
-              <span className="text-slate-400 block text-[10px]">TOTAL RECORDINGS</span>
-              <span className="text-lg font-bold text-white">{recordings.length}</span>
-            </div>
-            <div className="h-8 w-px bg-slate-800" />
-            <div className="text-right">
-              <span className="text-slate-400 block text-[10px]">TOTAL WORDS ALIGNED</span>
-              <span className="text-lg font-bold text-indigo-400">
-                {recordings.reduce((acc, r) => acc + (r.word_count || 0), 0)}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* 3-Column Responsive Layout */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-          {/* Column 1: Recording List (3 cols) */}
-          <div className="lg:col-span-3 h-[780px]">
-            <RecordingList
-              recordings={recordings}
-              selectedId={selectedRecording?.id || null}
-              onSelect={handleSelectRecording}
-              searchQuery={searchQuery}
-              onSearchChange={setSearchQuery}
-              onSearchSubmit={handleSearchSubmit}
-            />
-          </div>
-
-          {/* Column 2: Player + Transcript Viewer (5 cols) */}
-          <div className="lg:col-span-5 space-y-6">
-            {selectedRecording ? (
-              <>
-                <AudioDetailPlayer
-                  recording={selectedRecording}
-                  seekTimeMs={seekTimeMs}
-                  onTimeUpdate={(ms) => setCurrentTimeMs(ms)}
-                />
-
-                <div className="h-[560px]">
-                  <TranscriptViewer
-                    segments={selectedRecording.segments || []}
-                    currentTimeMs={currentTimeMs}
-                    onSeek={(ms) => setSeekTimeMs(ms)}
-                    wordCount={selectedRecording.word_count || 0}
-                  />
-                </div>
-              </>
-            ) : (
-              <div className="glass-panel rounded-2xl p-16 text-center text-slate-500 space-y-3">
-                <Headphones className="w-10 h-10 mx-auto text-slate-600" />
-                <p className="text-sm">Select a recording from the left to view transcript and playback.</p>
+            <div className="flex items-center gap-6 font-mono text-xs">
+              <div className="text-center">
+                <p className="text-gray-500 text-[10px]">RECORDINGS</p>
+                <p className="text-2xl font-bold text-white">{recordings.length}</p>
               </div>
-            )}
+              <div className="w-px h-10 bg-[#1f1f2e]" />
+              <div className="text-center">
+                <p className="text-gray-500 text-[10px]">TOTAL WORDS</p>
+                <p className="text-2xl font-bold text-violet-400">
+                  {recordings.reduce((acc, r) => acc + (r.word_count || 0), 0)}
+                </p>
+              </div>
+            </div>
           </div>
 
-          {/* Column 3: RAG Chat & Action Items (4 cols) */}
-          <div className="lg:col-span-4 space-y-6">
-            <div className="h-[460px]">
-              <RagChat onCitationClick={handleCitationClick} />
+          {/* Content: Player + Transcript | Chat + Actions */}
+          <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
+
+            {/* Player + Transcript (7 cols) */}
+            <div className="xl:col-span-7 space-y-4">
+              {selectedRecording ? (
+                <>
+                  <AudioDetailPlayer
+                    recording={selectedRecording}
+                    seekTimeMs={seekTimeMs}
+                    onTimeUpdate={(ms) => setCurrentTimeMs(ms)}
+                    onDelete={handleDeleteRecording}
+                  />
+                  <div className="h-[500px] overflow-hidden rounded-xl border border-[#1f1f2e]">
+                    <TranscriptViewer
+                      segments={selectedRecording.segments || []}
+                      currentTimeMs={currentTimeMs}
+                      onSeek={(ms) => setSeekTimeMs(ms)}
+                      wordCount={selectedRecording.word_count || 0}
+                    />
+                  </div>
+                </>
+              ) : (
+                <div className="flex flex-col items-center justify-center h-64 rounded-xl border border-[#1f1f2e] bg-[#111118] text-gray-600 gap-3">
+                  <Headphones className="w-10 h-10" />
+                  <p className="text-sm">Select a recording from the sidebar to get started.</p>
+                </div>
+              )}
             </div>
 
-            <ActionItemsPanel
-              actionItems={selectedRecording?.action_items || []}
-              onActionUpdated={() => {
-                if (selectedRecording) handleSelectRecording(selectedRecording);
-              }}
-            />
-          </div>
-        </div>
-      </main>
+            {/* RAG Chat + Action Items (5 cols) */}
+            <div className="xl:col-span-5 space-y-4">
+              <div className="h-[420px] overflow-hidden rounded-xl border border-[#1f1f2e]">
+                <RagChat onCitationClick={handleCitationClick} />
+              </div>
+              <ActionItemsPanel
+                actionItems={selectedRecording?.action_items || []}
+                onActionUpdated={() => {
+                  if (selectedRecording) handleSelectRecording(selectedRecording);
+                }}
+              />
+            </div>
 
-      {/* Modals */}
+          </div>
+        </main>
+      </div>
+
+      {/* ── Modals ───────────────────────────────────────────────────────── */}
       <UploadModal
         isOpen={isUploadOpen}
         onClose={() => setIsUploadOpen(false)}
-        onUploadSuccess={() => {
-          loadRecordings();
-        }}
+        onUploadSuccess={handleUploadSuccess}
+        initialMode={uploadModalMode}
       />
-
       <VerificationModal
         isOpen={isVerificationOpen}
         onClose={() => setIsVerificationOpen(false)}

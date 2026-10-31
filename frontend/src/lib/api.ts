@@ -89,6 +89,14 @@ export const api = {
     return res.json();
   },
 
+  async deleteRecording(id: string): Promise<any> {
+    const res = await fetch(`${API_BASE}/recordings/${id}`, {
+      method: "DELETE",
+    });
+    if (!res.ok) throw new Error("Failed to delete recording");
+    return res.json();
+  },
+
   getAudioUrl(recordingId: string): string {
     return `${API_BASE}/audio/${recordingId}`;
   },

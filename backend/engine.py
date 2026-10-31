@@ -14,9 +14,17 @@ import wave
 import struct
 import tempfile
 from typing import Dict, Any, List, Tuple, Optional
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend", ".env"))
+
 from backend.aligner import align_tokens_to_speakers, verify_zero_loss
 from backend.database import db
 
+GROQ_API_KEY = os.getenv("GROQ_API_KEY") or os.getenv("groq_api_key") or "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"
 HF_TOKEN = os.getenv("HF_TOKEN", "")
 
 # Cache whisper model to avoid reload latency
@@ -40,8 +48,77 @@ def get_whisper_model():
 def transcribe_audio_words(audio_path: str) -> List[Dict[str, Any]]:
     """
     Transcribes audio file to word-level tokens with start and end timestamps.
+    Uses Groq's whisper-large-v3-turbo as the primary high-speed engine.
     Returns: [{"text": str, "start": float, "end": float}, ...]
     """
+    # 1. Primary Engine: Groq whisper-large-v3-turbo
+    groq_key = os.getenv("GROQ_API_KEY") or os.getenv("groq_api_key") or GROQ_API_KEY
+    if groq_key:
+        try:
+            from groq import Groq
+            client = Groq(api_key=groq_key)
+            print(f"[Engine] Calling Groq whisper-large-v3-turbo for: {audio_path}")
+            
+            with open(audio_path, "rb") as f:
+                file_bytes = f.read()
+
+            fname = os.path.basename(audio_path)
+            if not fname.lower().endswith((".wav", ".mp3", ".m4a", ".webm", ".ogg", ".flac")):
+                fname = f"{fname}.wav"
+
+            transcription = client.audio.transcriptions.create(
+                file=(fname, file_bytes),
+                model="whisper-large-v3-turbo",
+                temperature=0,
+                response_format="verbose_json",
+                timestamp_granularities=["word"]
+            )
+
+            asr_tokens = []
+            words = getattr(transcription, "words", None)
+            if words:
+                for w in words:
+                    w_text = w.get("word") if isinstance(w, dict) else getattr(w, "word", "")
+                    w_start = w.get("start") if isinstance(w, dict) else getattr(w, "start", 0.0)
+                    w_end = w.get("end") if isinstance(w, dict) else getattr(w, "end", w_start + 0.2)
+                    clean_text = str(w_text).strip()
+                    if clean_text:
+                        asr_tokens.append({
+                            "text": clean_text,
+                            "start": round(float(w_start), 3),
+                            "end": round(float(w_end), 3)
+                        })
+
+            if not asr_tokens:
+                segments = getattr(transcription, "segments", None)
+                if segments:
+                    for seg in segments:
+                        seg_text = seg.get("text") if isinstance(seg, dict) else getattr(seg, "text", "")
+                        seg_start = seg.get("start") if isinstance(seg, dict) else getattr(seg, "start", 0.0)
+                        seg_end = seg.get("end") if isinstance(seg, dict) else getattr(seg, "end", seg_start + 1.0)
+                        seg_words = seg_text.strip().split()
+                        if seg_words:
+                            dur = max(0.05, (float(seg_end) - float(seg_start)) / len(seg_words))
+                            for i, w in enumerate(seg_words):
+                                w_start = round(float(seg_start) + i * dur, 3)
+                                w_end = round(w_start + dur, 3)
+                                asr_tokens.append({"text": w, "start": w_start, "end": w_end})
+
+            if not asr_tokens and getattr(transcription, "text", None):
+                text_content = transcription.text.strip()
+                if text_content:
+                    words = text_content.split()
+                    for i, w in enumerate(words):
+                        asr_tokens.append({"text": w, "start": round(i * 0.35, 3), "end": round((i + 1) * 0.35, 3)})
+
+            if asr_tokens:
+                print(f"[Engine] Groq transcribed {len(asr_tokens)} words successfully!")
+                return asr_tokens
+            else:
+                print("[Engine] Groq returned empty transcription, trying secondary...")
+        except Exception as e:
+            print(f"[Engine] Groq whisper transcription failed: {e}. Falling back to secondary engine.")
+
     model = get_whisper_model()
     if model is not None:
         try:
@@ -271,7 +348,11 @@ def run_pipeline(job_id: str, recording_id: str, audio_path: str):
         
         # Full text & Summary
         full_text = " ".join(s["text"] for s in aligned_segments if s["speaker"] != "-2")
-        summary = f"Discussion covering {len(aligned_segments)} speaker segments. Topics include vendor commitments and delivery timelines."
+        if full_text:
+            text_preview = full_text[:160] + ("..." if len(full_text) > 160 else "")
+            summary = f"Transcript ({loss_report['aligned_word_count']} words, {len(aligned_segments)} segments): \"{text_preview}\""
+        else:
+            summary = "Audio recording transcribed with 0 speech words detected."
 
         # Action Items
         actions = extract_action_items(full_text, recording_id)

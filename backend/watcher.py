@@ -26,7 +26,7 @@ def scan_and_process():
     try:
         files = os.listdir(WATCH_DIR)
         for fname in files:
-            if not fname.lower().endswith((".wav", ".mp3", ".m4a", ".ogg")):
+            if not fname.lower().endswith((".wav", ".mp3", ".m4a", ".ogg", ".webm")):
                 continue
             
             fpath = os.path.join(WATCH_DIR, fname)
@@ -73,6 +73,9 @@ def scan_and_process():
         print(f"[Watcher] Scan error: {e}")
 
 
+ENABLE_WATCHER = os.getenv("ENABLE_WATCHER", "false").lower() in ("true", "1")
+
+
 def _watcher_loop(interval_sec: float = 2.0):
     global _watcher_running
     print(f"[Watcher] Live file watcher started on {WATCH_DIR} (interval={interval_sec}s)...")
@@ -83,6 +86,10 @@ def _watcher_loop(interval_sec: float = 2.0):
 
 def start_watcher(interval_sec: float = 2.0):
     global _watcher_running
+    if not ENABLE_WATCHER:
+        print("[Watcher] Live file watcher is disabled by default (ENABLE_WATCHER=false). Unsolicited auto-recordings disabled.")
+        return
+
     if not _watcher_running:
         _watcher_running = True
         w_thread = threading.Thread(target=_watcher_loop, args=(interval_sec,), daemon=True)
