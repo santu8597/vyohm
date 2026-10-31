@@ -322,6 +322,20 @@ def run_pipeline(job_id: str, recording_id: str, audio_path: str):
     5. Save into database
     """
     try:
+        # Idempotency guard: prevent duplicate execution if job already finished
+        existing_job = db.get_job(job_id)
+        if existing_job and existing_job.get("status") == "COMPLETED":
+            print(f"[Pipeline] Job {job_id} already COMPLETED. Skipping duplicate pipeline execution.")
+            return
+
+        # Guard: if recording is already marked COMPLETED and has segments, skip
+        rec = db.get_recording(recording_id)
+        if rec and rec.get("status") == "COMPLETED":
+            segs = db.get_segments(recording_id)
+            if len(segs) > 0:
+                print(f"[Pipeline] Recording {recording_id} already has {len(segs)} segments. Skipping duplicate.")
+                return
+
         db.set_job(job_id, status="PROCESSING", stage="transcription")
         
         # Stage 1: Transcription

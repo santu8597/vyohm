@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 import uuid
 import datetime
+import hashlib
 from typing import Optional, List, Dict, Any
 
 # Ensure parent directory (project root) is on sys.path
@@ -91,57 +92,152 @@ async def upload_audio(
 ):
     """
     Contract endpoint. Hardware & web send audio here.
-    Enforces Phase 3.1 Idempotency constraint UNIQUE(device_id, recorded_at):
-    - Duplicate -> returns HTTP 200 with {"status": "duplicate"}
-    - New -> returns HTTP 201 with {"id": job_id, "status": "PENDING"}
-    (Hardware relies on 201 to decide whether to remove the clip from the queue).
+    Enforces deduplication, SHA-256 checksum integrity, and deterministic job IDs:
+    - Calculates SHA-256 checksum of audio payload.
+    - Generates deterministic job ID: job-{checksum[:16]}.
+    - Checks whether recording is already in PROCESSING / PENDING state.
+    - If duplicate or already processing -> returns HTTP 200 with {"status": "duplicate"}.
+    - If previously crashed (FAILED) -> retries execution idempotently.
+    - If new -> returns HTTP 201 with {"id": job_id, "status": "PENDING"}.
     """
     if not recorded_at:
         recorded_at = datetime.datetime.utcnow().isoformat()
 
-    # Generate filename and path
+    # Read audio bytes & compute SHA-256 checksum
+    contents = await audio.read()
+    checksum = hashlib.sha256(contents).hexdigest()
+    deterministic_job_id = f"job-{checksum[:16]}"
+
+    # 1. Check if this exact audio recording already exists in DB by checksum
+    existing_rec = db.get_recording_by_checksum(checksum)
+
+    # 2. Also check by (device_id, recorded_at) if not found by checksum
+    if not existing_rec:
+        conn = db._get_sqlite_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM recordings WHERE device_id = ? AND recorded_at = ?", (device_id, recorded_at))
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            existing_rec = dict(row)
+
+    # If existing recording found -> handle duplicate, in-flight, or crash retry
+    if existing_rec:
+        rec_id = existing_rec["id"]
+        rec_status = existing_rec.get("status", "")
+        existing_job = db.get_job(deterministic_job_id)
+        is_in_flight = rec_status in ("PROCESSING", "PENDING") or (
+            existing_job and existing_job.get("status") in ("PROCESSING", "PENDING")
+        )
+
+        # Case A: Already being processed right now
+        if is_in_flight:
+            response.status_code = status.HTTP_200_OK
+            return {
+                "status": "duplicate",
+                "message": "Recording is currently being processed. Duplicate upload ignored.",
+                "id": deterministic_job_id,
+                "recording_id": rec_id,
+                "checksum": checksum,
+                "device_id": existing_rec.get("device_id", device_id),
+                "recorded_at": existing_rec.get("recorded_at", recorded_at),
+                "is_duplicate": True,
+                "is_processing": True
+            }
+
+        # Case B: Already completed
+        if rec_status == "COMPLETED":
+            response.status_code = status.HTTP_200_OK
+            return {
+                "status": "duplicate",
+                "message": "Duplicate recording detected (matching SHA-256 checksum). Already transcribed.",
+                "id": deterministic_job_id,
+                "recording_id": rec_id,
+                "checksum": checksum,
+                "device_id": existing_rec.get("device_id", device_id),
+                "recorded_at": existing_rec.get("recorded_at", recorded_at),
+                "is_duplicate": True,
+                "is_processing": False
+            }
+
+        # Case C: Worker retry after crash / failure
+        if rec_status == "FAILED":
+            print(f"[Upload] Retrying crashed/failed recording {rec_id} with deterministic job {deterministic_job_id}...")
+            db.update_recording(rec_id, {"status": "PROCESSING"})
+            db.set_job(deterministic_job_id, status="PENDING", stage="retry_received", data={
+                "recording_id": rec_id,
+                "checksum": checksum,
+                "retry": True
+            })
+            saved_path = existing_rec.get("filepath", "")
+            if not os.path.exists(saved_path):
+                # Re-save file if needed
+                ext = os.path.splitext(audio.filename or "recording.wav")[1] or ".wav"
+                safe_filename = f"{device_id}_{int(datetime.datetime.utcnow().timestamp())}{ext}"
+                storage_res = storage.save_audio(safe_filename, contents)
+                saved_path = storage_res["filepath"]
+                db.update_recording(rec_id, {"filepath": saved_path})
+
+            background_tasks.add_task(run_pipeline, deterministic_job_id, rec_id, saved_path)
+            response.status_code = status.HTTP_200_OK
+            return {
+                "status": "retrying",
+                "message": "Previous attempt failed. Retrying processing with deterministic job ID.",
+                "id": deterministic_job_id,
+                "recording_id": rec_id,
+                "checksum": checksum,
+                "device_id": existing_rec.get("device_id", device_id),
+                "recorded_at": existing_rec.get("recorded_at", recorded_at),
+                "is_duplicate": True,
+                "is_processing": True
+            }
+
+    # 3. New recording: save to storage
     ext = os.path.splitext(audio.filename or "recording.wav")[1] or ".wav"
     safe_filename = f"{device_id}_{int(datetime.datetime.utcnow().timestamp())}{ext}"
-    saved_path = os.path.join(WATCH_DIR, safe_filename)
+    storage_res = storage.save_audio(safe_filename, contents)
+    saved_path = storage_res["filepath"]
 
-    # Check idempotency first before processing
+    # Create recording in DB with checksum
     rec, is_duplicate = db.create_recording(
         device_id=device_id,
         recorded_at=recorded_at,
         filename=audio.filename or safe_filename,
-        filepath=saved_path
+        filepath=saved_path,
+        checksum=checksum
     )
 
     if is_duplicate:
         response.status_code = status.HTTP_200_OK
         return {
             "status": "duplicate",
-            "message": "Duplicate recording detected for this device and recorded_at timestamp. Ignored.",
+            "message": "Duplicate recording detected. Ignored.",
+            "id": deterministic_job_id,
             "recording_id": rec.get("id") if rec else None,
+            "checksum": checksum,
             "device_id": device_id,
-            "recorded_at": recorded_at
+            "recorded_at": recorded_at,
+            "is_duplicate": True,
+            "is_processing": False
         }
 
-    # Save audio stream to local PC disk (backend/uploads/) & sync to MinIO
-    contents = await audio.read()
-    storage_res = storage.save_audio(safe_filename, contents)
-    saved_path = storage_res["filepath"]
-
-    job_id = f"job-{uuid.uuid4().hex[:8]}"
-    db.set_job(job_id, status="PENDING", stage="received", data={
+    # Register deterministic job in queue
+    db.set_job(deterministic_job_id, status="PENDING", stage="received", data={
         "recording_id": rec["id"],
+        "checksum": checksum,
         "file": safe_filename,
         "minio_synced": storage_res.get("minio_synced", False)
     })
 
-    # Trigger async background pipeline
-    background_tasks.add_task(run_pipeline, job_id, rec["id"], saved_path)
+    # Trigger async background pipeline with deterministic job ID
+    background_tasks.add_task(run_pipeline, deterministic_job_id, rec["id"], saved_path)
 
     response.status_code = status.HTTP_201_CREATED
     return {
-        "id": job_id,
+        "id": deterministic_job_id,
         "status": "PENDING",
         "recording_id": rec["id"],
+        "checksum": checksum,
         "device_id": device_id,
         "recorded_at": recorded_at
     }

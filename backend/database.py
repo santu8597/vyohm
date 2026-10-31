@@ -119,7 +119,7 @@ class DatabaseManager:
 
         conn.commit()
 
-        # Migrate existing DBs: add alias and key_insights columns if they don't exist
+        # Migrate existing DBs: add alias, key_insights, and checksum columns if they don't exist
         try:
             cursor.execute("ALTER TABLE recordings ADD COLUMN alias TEXT DEFAULT ''")
             conn.commit()
@@ -130,6 +130,23 @@ class DatabaseManager:
             conn.commit()
         except Exception:
             pass  # Column already exists
+        try:
+            cursor.execute("ALTER TABLE recordings ADD COLUMN checksum TEXT DEFAULT ''")
+            conn.commit()
+        except Exception:
+            pass  # Column already exists
+
+        # Unique partial index on checksum: ensures absolute uniqueness at the DB level
+        # while ignoring empty legacy rows without checksum
+        try:
+            cursor.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_recordings_checksum
+                ON recordings(checksum)
+                WHERE checksum IS NOT NULL AND checksum != ''
+            """)
+            conn.commit()
+        except Exception:
+            pass
 
         conn.close()
 
@@ -144,17 +161,32 @@ class DatabaseManager:
         duration_ms: int = 0,
         word_count: int = 0,
         summary: str = "",
-        recording_id: Optional[str] = None
+        recording_id: Optional[str] = None,
+        checksum: Optional[str] = None
     ) -> Tuple[Optional[Dict[str, Any]], bool]:
         """
         Idempotent recording creation.
         Returns (recording_dict, is_duplicate).
-        If (device_id, recorded_at) already exists, returns existing record and True.
+        If (checksum) already exists (non-empty) OR (device_id, recorded_at) already exists,
+        returns existing record and True.
         """
         rec_id = recording_id or f"rec-{uuid.uuid4().hex[:8]}"
         now = datetime.datetime.utcnow().isoformat()
+        checksum_val = (checksum or "").strip()
+
+        # 1. Fast checksum deduplication check
+        if checksum_val:
+            existing = self.get_recording_by_checksum(checksum_val)
+            if existing:
+                return existing, True
 
         if self.mode == "mongodb":
+            # Check (device_id, recorded_at)
+            existing = self.mongo_db.recordings.find_one({"device_id": device_id, "recorded_at": recorded_at})
+            if existing:
+                existing["id"] = existing.get("_id", existing.get("id"))
+                return existing, True
+
             doc = {
                 "_id": rec_id,
                 "id": rec_id,
@@ -166,13 +198,17 @@ class DatabaseManager:
                 "word_count": word_count,
                 "status": "PROCESSING",
                 "summary": summary,
+                "checksum": checksum_val,
                 "created_at": now
             }
             try:
                 self.mongo_db.recordings.insert_one(doc)
                 return doc, False
             except DuplicateKeyError:
-                existing = self.mongo_db.recordings.find_one({"device_id": device_id, "recorded_at": recorded_at})
+                if checksum_val:
+                    existing = self.mongo_db.recordings.find_one({"checksum": checksum_val})
+                if not existing:
+                    existing = self.mongo_db.recordings.find_one({"device_id": device_id, "recorded_at": recorded_at})
                 if existing:
                     existing["id"] = existing.get("_id", existing.get("id"))
                 return existing, True
@@ -182,21 +218,77 @@ class DatabaseManager:
         # SQLite implementation
         conn = self._get_sqlite_conn()
         cursor = conn.cursor()
+
+        # Check (device_id, recorded_at) in SQLite first
+        cursor.execute("SELECT * FROM recordings WHERE device_id = ? AND recorded_at = ?", (device_id, recorded_at))
+        existing_row = cursor.fetchone()
+        if existing_row:
+            conn.close()
+            return dict(existing_row), True
+
         try:
             cursor.execute("""
-                INSERT INTO recordings (id, device_id, recorded_at, filename, filepath, duration_ms, word_count, status, summary, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'PROCESSING', ?, ?)
-            """, (rec_id, device_id, recorded_at, filename, filepath, duration_ms, word_count, summary, now))
+                INSERT INTO recordings (id, device_id, recorded_at, filename, filepath, duration_ms, word_count, status, summary, checksum, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'PROCESSING', ?, ?, ?)
+            """, (rec_id, device_id, recorded_at, filename, filepath, duration_ms, word_count, summary, checksum_val, now))
             conn.commit()
             cursor.execute("SELECT * FROM recordings WHERE id = ?", (rec_id,))
             row = dict(cursor.fetchone())
             conn.close()
             return row, False
         except sqlite3.IntegrityError:
-            cursor.execute("SELECT * FROM recordings WHERE device_id = ? AND recorded_at = ?", (device_id, recorded_at))
-            row = cursor.fetchone()
+            # Collision on unique constraint (checksum or device_id+recorded_at)
+            row = None
+            if checksum_val:
+                cursor.execute("SELECT * FROM recordings WHERE checksum = ?", (checksum_val,))
+                row = cursor.fetchone()
+            if not row:
+                cursor.execute("SELECT * FROM recordings WHERE device_id = ? AND recorded_at = ?", (device_id, recorded_at))
+                row = cursor.fetchone()
             conn.close()
             return dict(row) if row else None, True
+
+    def get_recording_by_checksum(self, checksum: str) -> Optional[Dict[str, Any]]:
+        """Look up recording by its SHA-256 checksum."""
+        if not checksum or not checksum.strip():
+            return None
+        checksum = checksum.strip()
+
+        if self.mode == "mongodb":
+            try:
+                rec = self.mongo_db.recordings.find_one({"checksum": checksum})
+                if rec:
+                    rec["id"] = str(rec.get("_id", rec.get("id")))
+                    rec.pop("_id", None)
+                    return rec
+            except Exception as e:
+                print(f"[Database] Mongo read checksum error: {e}")
+
+        conn = self._get_sqlite_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM recordings WHERE checksum = ?", (checksum,))
+        row = cursor.fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def is_recording_processing(self, recording_id: Optional[str] = None, checksum: Optional[str] = None) -> bool:
+        """Check whether a recording or its deterministic job is currently in progress."""
+        rec = None
+        if checksum:
+            rec = self.get_recording_by_checksum(checksum)
+        if not rec and recording_id:
+            rec = self.get_recording(recording_id)
+
+        if rec and rec.get("status") in ("PROCESSING", "PENDING"):
+            return True
+
+        if checksum:
+            job_id = f"job-{checksum[:16]}"
+            job = self.get_job(job_id)
+            if job and job.get("status") in ("PROCESSING", "PENDING"):
+                return True
+
+        return False
 
     def update_recording(self, recording_id: str, updates: Dict[str, Any]):
         if self.mode == "mongodb":

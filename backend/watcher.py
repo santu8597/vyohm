@@ -9,6 +9,7 @@ import os
 import time
 import uuid
 import datetime
+import hashlib
 import threading
 from typing import Set
 from backend.database import db
@@ -22,7 +23,7 @@ _watcher_running = False
 
 
 def scan_and_process():
-    """Scans the upload directory for unprocessed audio files."""
+    """Scans the upload directory for unprocessed audio files with SHA-256 deduplication."""
     try:
         files = os.listdir(WATCH_DIR)
         for fname in files:
@@ -42,18 +43,37 @@ def scan_and_process():
             # Wait a moment to ensure file is completely written if still streaming
             time.sleep(0.5)
 
+            # Compute SHA-256 checksum of file content
+            try:
+                with open(fpath, "rb") as f:
+                    file_bytes = f.read()
+                checksum = hashlib.sha256(file_bytes).hexdigest()
+            except Exception as e:
+                print(f"[Watcher] Error reading {fname} for checksum: {e}")
+                continue
+
+            deterministic_job_id = f"job-{checksum[:16]}"
+
+            # Deduplication: check if already exists in DB by checksum
+            existing_rec = db.get_recording_by_checksum(checksum)
+            if existing_rec:
+                print(f"[Watcher] Duplicate detected for {fname} (matched SHA-256 checksum {checksum[:8]}). Skipping.")
+                processed_files.add(file_key)
+                continue
+
             # Extract or assign device_id and recorded_at
             device_id = "device-auto-watcher"
             recorded_at = datetime.datetime.fromtimestamp(fstat.st_mtime).isoformat()
             
-            # Check idempotency
+            # Check idempotency in DB
             rec, is_dup = db.create_recording(
                 device_id=device_id,
                 recorded_at=recorded_at,
                 filename=fname,
                 filepath=fpath,
                 duration_ms=0,
-                word_count=0
+                word_count=0,
+                checksum=checksum
             )
 
             processed_files.add(file_key)
@@ -62,11 +82,10 @@ def scan_and_process():
                 print(f"[Watcher] Duplicate detected for {fname} ({device_id}, {recorded_at}). Skipping.")
                 continue
 
-            job_id = f"job-watcher-{uuid.uuid4().hex[:8]}"
-            print(f"[Watcher] New audio file detected: {fname}. Auto-triggering pipeline with job {job_id}...")
+            print(f"[Watcher] New audio file detected: {fname} (checksum={checksum[:8]}). Auto-triggering pipeline with deterministic job {deterministic_job_id}...")
             
             # Run pipeline asynchronously in thread
-            thread = threading.Thread(target=run_pipeline, args=(job_id, rec["id"], fpath), daemon=True)
+            thread = threading.Thread(target=run_pipeline, args=(deterministic_job_id, rec["id"], fpath), daemon=True)
             thread.start()
 
     except Exception as e:
