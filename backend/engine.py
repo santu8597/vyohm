@@ -24,8 +24,7 @@ load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend",
 from backend.aligner import align_tokens_to_speakers, verify_zero_loss
 from backend.database import db
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY") or os.getenv("groq_api_key") or "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"
-HF_TOKEN = os.getenv("HF_TOKEN", "")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY") or os.getenv("groq_api_key") 
 
 # Cache whisper model to avoid reload latency
 _whisper_model = None
