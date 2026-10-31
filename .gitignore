@@ -38,3 +38,5 @@ coverage/
 *.tmp
 __pycache__/
 *.py[cod]
+
+*.db
