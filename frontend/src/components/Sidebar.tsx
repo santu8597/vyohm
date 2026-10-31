@@ -35,7 +35,8 @@ export function Sidebar({
   const [hoveredId, setHoveredId] = useState<string | null>(null);
 
   const filtered = recordings.filter((r) =>
-    r.filename.toLowerCase().includes(searchQuery.toLowerCase())
+    r.filename.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    (r.alias && r.alias.toLowerCase().includes(searchQuery.toLowerCase()))
   );
 
   const formatDate = (dateStr: string) => {
@@ -92,7 +93,7 @@ export function Sidebar({
             type="text"
             value={searchQuery}
             onChange={(e) => onSearchChange(e.target.value)}
-            placeholder="Search recordings…"
+            placeholder="Search recordings or alias…"
             className="w-full bg-[#111118] border border-[#1f1f2e] rounded-lg pl-7 pr-3 py-1.5 text-xs text-gray-300 placeholder-gray-600 focus:outline-none focus:border-violet-600 transition-colors"
           />
         </div>
@@ -119,12 +120,21 @@ export function Sidebar({
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div className="flex-1 min-w-0">
-                      <p className="text-xs font-medium truncate">{rec.filename}</p>
-                      {rec.recorded_at && (
-                        <p className="text-[10px] text-gray-600 mt-0.5">
-                          {formatDate(rec.recorded_at)}
-                        </p>
-                      )}
+                      <p className="text-xs font-medium truncate text-gray-200 group-hover:text-white">
+                        {rec.alias || rec.filename}
+                      </p>
+                      <div className="flex items-center gap-1.5 mt-0.5">
+                        {rec.alias && (
+                          <span className="text-[9px] px-1 py-0.2 rounded bg-violet-600/25 text-violet-300 font-mono">
+                            AI
+                          </span>
+                        )}
+                        {rec.recorded_at && (
+                          <span className="text-[10px] text-gray-500 font-mono">
+                            {formatDate(rec.recorded_at)}
+                          </span>
+                        )}
+                      </div>
                     </div>
                     {/* Action icons on hover */}
                     <div className={`flex items-center gap-1 shrink-0 transition-opacity ${isHovered || isSelected ? "opacity-100" : "opacity-0"}`}>

@@ -161,20 +161,35 @@ async def get_job_status(job_id: str):
 @app.get("/recordings")
 def get_all_recordings():
     """List all recordings ordered by date."""
-    return db.list_recordings()
+    import json as _json
+    recs = db.list_recordings()
+    for r in recs:
+        if isinstance(r.get("key_insights"), str):
+            try:
+                r["key_insights"] = _json.loads(r["key_insights"])
+            except Exception:
+                r["key_insights"] = []
+    return recs
 
 
 @app.get("/recordings/{recording_id}")
 def get_recording_detail(recording_id: str):
     """Detail page data: recording metadata, segments, and action items."""
+    import json as _json
     rec = db.get_recording(recording_id)
     if not rec:
         raise HTTPException(status_code=404, detail="Recording not found")
+    if isinstance(rec.get("key_insights"), str):
+        try:
+            rec["key_insights"] = _json.loads(rec["key_insights"])
+        except Exception:
+            rec["key_insights"] = []
     segments = db.get_segments(recording_id)
     actions = db.list_action_items(recording_id=recording_id)
     rec["segments"] = segments
     rec["action_items"] = actions
     return rec
+
 
 
 @app.delete("/recordings/{recording_id}")
@@ -280,6 +295,212 @@ def claude_recording_chat(recording_id: str, req: RecordingChatRequest):
 def search(q: str = Query(..., min_length=1), date_from: Optional[str] = None, date_to: Optional[str] = None):
     """Global search across transcripts."""
     return search_transcripts(q, date_from=date_from, date_to=date_to)
+
+
+# ---------------- RECORDING INSIGHTS (Alias + Summary + Key Phrases) ---------- #
+
+@app.post("/recordings/{recording_id}/insights")
+def generate_recording_insights(recording_id: str):
+    """
+    Uses Claude to generate:
+    - A short human-friendly alias (e.g. "Pulse Survey Sync – Oct 31")
+    - A 2-3 sentence concise summary
+    - 5-8 key insight phrases / keywords
+    Saves alias and key_insights to DB and returns them.
+    """
+    rec = db.get_recording(recording_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    segments = db.get_segments(recording_id)
+    if not segments:
+        raise HTTPException(status_code=422, detail="No transcript available yet. Process the recording first.")
+
+    # Build transcript text
+    transcript_lines = []
+    for seg in segments:
+        start_s = seg.get("start_ms", 0) / 1000
+        speaker = seg.get("speaker", "UNKNOWN")
+        text = seg.get("text", "").strip()
+        if text and text != "[SILENCE]":
+            transcript_lines.append(f"[{start_s:.1f}s] {speaker}: {text}")
+    transcript_text = "\n".join(transcript_lines) or "(No transcript)"
+
+    import anthropic as _anthropic
+    from pathlib import Path as _Path
+    from dotenv import load_dotenv as _load_dotenv
+    import json as _json
+
+    _env_path = _Path(__file__).resolve().parent / ".env"
+    if _env_path.exists():
+        _load_dotenv(dotenv_path=_env_path, override=True)
+
+    claude_key = os.getenv("CLAUDE_KEY", "")
+    if not claude_key or claude_key in ("my_claude_key", ""):
+        raise HTTPException(status_code=503, detail="CLAUDE_KEY not configured in backend/.env")
+
+    client = _anthropic.Anthropic(api_key=claude_key)
+    model = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
+
+    prompt = f"""You are analyzing an audio recording transcript. Return ONLY valid JSON with no markdown fences.
+
+Transcript:
+---
+{transcript_text}
+---
+
+Return this exact JSON structure:
+{{
+  "alias": "Short descriptive name for this recording (max 8 words, human-friendly like 'Pulse Survey Team Sync')",
+  "summary": "2-3 sentence concise summary of what was discussed, who was involved, and any outcomes.",
+  "key_insights": ["phrase1", "phrase2", "phrase3", "phrase4", "phrase5"]
+}}
+
+Rules:
+- alias: max 8 words, no dates unless critical, title-case
+- summary: plain prose, 2-3 sentences, factual and concise
+- key_insights: 5-8 short phrases (2-4 words each) capturing the most important topics, names, or action items
+- Return ONLY the JSON object, nothing else"""
+
+    response = client.messages.create(
+        model=model,
+        max_tokens=512,
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    raw = response.content[0].text.strip()
+    # Strip any accidental markdown fences
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    raw = raw.strip()
+
+    try:
+        data = _json.loads(raw)
+    except Exception:
+        raise HTTPException(status_code=500, detail=f"Claude returned invalid JSON: {raw[:200]}")
+
+    alias = data.get("alias", "")
+    summary = data.get("summary", "")
+    key_insights = data.get("key_insights", [])
+
+    # Persist to DB
+    updates: Dict[str, Any] = {
+        "alias": alias,
+        "key_insights": _json.dumps(key_insights),
+    }
+    if summary:
+        updates["summary"] = summary
+    db.update_recording(recording_id, updates)
+
+    return {
+        "recording_id": recording_id,
+        "alias": alias,
+        "summary": summary,
+        "key_insights": key_insights,
+    }
+
+
+@app.post("/recordings/{recording_id}/draft-followup")
+def draft_followup_email(recording_id: str):
+    """
+    Uses Claude to draft a professional follow-up email based on the transcript.
+    Saves to action_items as awaiting_confirmation. Never auto-sends.
+    """
+    rec = db.get_recording(recording_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    segments = db.get_segments(recording_id)
+    if not segments:
+        raise HTTPException(status_code=422, detail="No transcript available to draft from.")
+
+    from backend.claude_chat import _format_transcript, _build_system_prompt, CLAUDE_KEY, CLAUDE_MODEL
+    from backend.tools import set_recording_context, draft_email as draft_email_fn
+    import anthropic as _anthropic
+    from pathlib import Path as _Path
+    from dotenv import load_dotenv as _load_dotenv
+
+    _env_path = _Path(__file__).resolve().parent / ".env"
+    if _env_path.exists():
+        _load_dotenv(dotenv_path=_env_path, override=True)
+
+    claude_key = os.getenv("CLAUDE_KEY", CLAUDE_KEY)
+    if not claude_key or claude_key in ("my_claude_key", ""):
+        raise HTTPException(status_code=503, detail="CLAUDE_KEY not configured")
+
+    transcript_text = _format_transcript(segments)
+    set_recording_context(recording_id)
+
+    client = _anthropic.Anthropic(api_key=claude_key)
+    model = os.getenv("CLAUDE_MODEL", CLAUDE_MODEL)
+
+    tools = [
+        {
+            "name": "draft_email",
+            "description": "Save a follow-up email draft to DB (never auto-sent).",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "to": {"type": "string"},
+                    "subject": {"type": "string"},
+                    "body": {"type": "string"}
+                },
+                "required": ["to", "subject", "body"]
+            }
+        }
+    ]
+
+    system = f"""You are a professional assistant. Based on the recording transcript below, draft a concise and professional follow-up email capturing key decisions, action items, and next steps.
+
+Transcript:
+---
+{transcript_text}
+---
+
+Call the draft_email tool ONCE with a professional follow-up email. Address it to the relevant participants mentioned. Use a clear subject line."""
+
+    response = client.messages.create(
+        model=model,
+        max_tokens=1024,
+        system=system,
+        tools=tools,
+        messages=[{"role": "user", "content": "Draft a follow-up email for this recording."}]
+    )
+
+    drafted = None
+    for block in response.content:
+        if getattr(block, "type", None) == "tool_use" and block.name == "draft_email":
+            inp = block.input or {}
+            result = draft_email_fn(
+                to=inp.get("to", "Team"),
+                subject=inp.get("subject", "Follow-up"),
+                body=inp.get("body", ""),
+            )
+            drafted = {
+                "to": inp.get("to", ""),
+                "subject": inp.get("subject", ""),
+                "body": inp.get("body", ""),
+                "result": result,
+            }
+            break
+
+    if not drafted:
+        # Claude answered in text — extract text and use as body
+        text = "".join(b.text for b in response.content if hasattr(b, "text") and b.text)
+        result = draft_email_fn(
+            to="Team",
+            subject=f"Follow-up: {rec.get('alias', rec.get('filename', 'Recording'))}",
+            body=text,
+        )
+        drafted = {"to": "Team", "subject": "Follow-up", "body": text, "result": result}
+
+    return {
+        "recording_id": recording_id,
+        "drafted": drafted,
+        "message": "Email draft saved to Email Approval page. It will NOT be sent until you approve it.",
+    }
 
 
 # ---------------- PHASE 2: CONFIRMATION LOGIC & ACTION ITEMS ---------------- #

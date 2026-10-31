@@ -95,11 +95,21 @@ export function AudioDetailPlayer({
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
         <div>
           <div className="flex items-center gap-3">
-            <h2 className="text-xl font-bold text-white tracking-wide">{recording.filename}</h2>
+            <h2 className="text-xl font-bold text-white tracking-wide">
+              {recording.alias || recording.filename}
+            </h2>
+            {recording.alias && (
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-violet-500/20 text-violet-300 border border-violet-500/30">
+                AI Alias
+              </span>
+            )}
             <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
               {recording.status}
             </span>
           </div>
+          {recording.alias && (
+            <p className="text-xs text-slate-500 font-mono mt-0.5">{recording.filename}</p>
+          )}
           <p className="text-xs text-slate-400 mt-1">
             Device: <span className="text-slate-300 font-mono">{recording.device_id}</span> • Recorded:{" "}
             {new Date(recording.recorded_at).toLocaleString()}

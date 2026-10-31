@@ -15,9 +15,18 @@ export interface Recording {
   word_count: number;
   status: string;
   summary: string;
+  alias?: string;
+  key_insights?: string[];  // stored as JSON string in DB, parsed on GET
   created_at: string;
   segments?: Segment[];
   action_items?: ActionItem[];
+}
+
+export interface RecordingInsights {
+  recording_id: string;
+  alias: string;
+  summary: string;
+  key_insights: string[];
 }
 
 export interface Segment {
@@ -173,6 +182,30 @@ export const api = {
       body: JSON.stringify({ messages }),
     });
     if (!res.ok) throw new Error("Chat request failed");
+    return res.json();
+  },
+
+  /** Generate Claude alias, summary, and key insight phrases for a recording */
+  async generateInsights(recordingId: string): Promise<RecordingInsights> {
+    const res = await fetch(`${API_BASE}/recordings/${recordingId}/insights`, {
+      method: "POST",
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error((err as any).detail || "Failed to generate insights");
+    }
+    return res.json();
+  },
+
+  /** Draft a follow-up email from the transcript and save to approvals queue */
+  async draftFollowUp(recordingId: string): Promise<{ recording_id: string; drafted: any; message: string }> {
+    const res = await fetch(`${API_BASE}/recordings/${recordingId}/draft-followup`, {
+      method: "POST",
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error((err as any).detail || "Failed to draft follow-up email");
+    }
     return res.json();
   },
 

@@ -118,6 +118,19 @@ class DatabaseManager:
         """)
 
         conn.commit()
+
+        # Migrate existing DBs: add alias and key_insights columns if they don't exist
+        try:
+            cursor.execute("ALTER TABLE recordings ADD COLUMN alias TEXT DEFAULT ''")
+            conn.commit()
+        except Exception:
+            pass  # Column already exists
+        try:
+            cursor.execute("ALTER TABLE recordings ADD COLUMN key_insights TEXT DEFAULT '[]'")
+            conn.commit()
+        except Exception:
+            pass  # Column already exists
+
         conn.close()
 
     # ---------------- RECORDINGS & IDEMPOTENCY ---------------- #
